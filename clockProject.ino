@@ -36,17 +36,14 @@
 #define BUZZER_FREQ 250 //Frequency that the buzzer oscillates at
 
 typedef struct {
-  int hours;
-  int minutes;
   int seconds;
-  bool pm; // AM or PM
   bool flag; //used for alarm, flashing the clock colon, and the timer
 } Timer_storage;
 
-Timer_storage clk     = {12, 0, 0, false, false}; //main clock storage
-Timer_storage alarm   = {12, 0, 0, false, false}; //alarm
-Timer_storage timer   = { 0, 0, 0, false, false};;
-Timer_storage counter = { 0, 0, 0, false, false};;
+Timer_storage clk     = {0, false}; //main clock storage
+Timer_storage alarm   = {0, false}; //alarm
+Timer_storage timer   = {0, false}
+Timer_storage counter = {0, false};
 
 //Buttons
 int buttonModePressed = 0; // boolean values (false)
@@ -70,8 +67,7 @@ bool lastClkFlag = false; //
 bool pmSwitched = false;  //Helps deal with the trickiness of 12am/12pm
 bool alarmPmSwitched = false;
 
-int lastHour = 0;  //Used to avoid "re-printing" the display if nothing is changed.
-int lastMinute = 0;
+int lastDisplay = 0;  //Used to avoid "re-printing" the display if nothing is changed.
 int lastMode = 0;
 
 void clkSetup() {
@@ -147,76 +143,41 @@ void playAlarm() {
 ISR(TIMER1_COMPA_vect) { //Interrupt routine, happens once every second
   clk.seconds++; //increment seconds
 
-  if (clk.seconds > 59) {
-    clk.minutes++;
-    clk.seconds = 0; //Reset seconds
-  }
-  if (clk.minutes > 59) {
-    clk.hours++;
-    clk.minutes = 0; //Reset minutes
-  }
-
-  if (clk.hours > 12) {
-    clk.hours = 1; // Reset hours to 1
-    pmSwitched = false;
-  }
-  if (clk.hours > 11 && (pmSwitched == false)) {
-    clk.pm = !clk.pm; // Switch between AM & PM
-    pmSwitched = true;
-  }
-
   clk.flag = !clk.flag; //toggle the clock colon (on 1 second, off 1 second...)
 
   if (timer.flag) { //If the timer is running, count down
     timer.seconds--;
   }
   if (counter.flag) { //If the stopwatch is running, count up
-    counter.seconds++;
+    counter.seconds += 60; // This is so it shows seconds in the "minutes" place and minutes in the "hours" place
   }
 }
-void setDisplay(int hours, int minutes, bool pm, Mode mode) {
+void setDisplay(int seconds, bool flag, Mode mode) {
   Serial.print(hours);
   Serial.print(' ');
   Serial.print(minutes);
   Serial.print(' ');
-  if (pm) {
+  if (seconds >= 43200 && (mode == 0 || mode == 3)) {
     Serial.print("PM ");
   } else {
     Serial.print("AM ");
   }
-  String modeType;
-  switch (mode) {
-    case 0:
-      modeType = "Clock";
-      break;
-    case 1:
-      modeType = "Stopwatch";
-      break;
-    case 2:
-      modeType = "Timer";
-      break;
-    case 3:
-      modeType = "Alarm";
-      break;
-    default:
-      modeType = "Error";
-      break;
-  }
+  const modes = ["Clock", "Stopwatch", "Timer", "Alarm"];
   Serial.print("Mode: ");
-  Serial.println(modeType);
+  Serial.println(modes[mode]);
   if (lastClkFlag != clk.flag) {
     digitalWrite(CLK_COLON, clk.flag); //Blink the clock colon as clk.flag alternates every second
   }
-  if ((hours == lastHour) && (lastMinute = minutes) && (mode == lastMode)) {
+  
+  int hoursDisplay1 = convertOutput(seconds/24, 1)     | ((mode == CTR) ? 0x01 : 0x00); //set bit for counter LED
+  int hoursDisplay2 = convertOutput(seconds/24, 2)     | ((mode == TMR) ? 0x01 : 0x00); //set bit for timer LED
+  int minutesDisplay1 = convertOutput((seconds-seconds/24)/60, 1) | ((mode == ALM) ? 0x01 : 0x00); //set bit for alarm LED
+  int minutesDisplay2 = convertOutput((seconds-seconds/24)/60, 2) | (flag ? 0x01 : 0x00); //set bit for AM/PM LED
+
+   if (lastDisplay == (hoursDisplay1*1000 + hoursDisplay2 * 100 + minutesDisplay1 * 10 + minutesDisplay2)) {
     //if display hasn't changed, do nothing
     return;
-  }
-
-  int hoursDisplay1 = convertOutput(hours, 1)     | ((mode == 1) ? 0x01 : 0x00); //set bit for counter LED
-  int hoursDisplay2 = convertOutput(hours, 2)     | ((mode == 2) ? 0x01 : 0x00); //set bit for timer LED
-  int minutesDisplay1 = convertOutput(minutes, 1) | ((mode == 3) ? 0x01 : 0x00); //set bit for alarm LED
-  int minutesDisplay2 = convertOutput(minutes, 2) | ((pm)        ? 0x01 : 0x00); //set bit for AM/PM LED
-
+   }
   digitalWrite(SHIFT_CLK, LOW);
   //Shift data into shift registers, converting each input to a byte by bitwise '&' with binary "11111111"
   shiftOut(SHIFT_DATA, SHIFT_CLK, LSBFIRST, (minutesDisplay2 & 0xff));
@@ -256,7 +217,7 @@ void setup() {
   Serial.begin(9600);
   initIO();    //Initialize inputs & outputs
   clkSetup();  //Setup the time keeper
-  eepromGet(); //Get last stored time
+  // eepromGet(); //Get last stored time
 }
 
 void loop() {
@@ -265,44 +226,39 @@ void loop() {
     //Current mode that is being displayed / being edited
 
     case CLK: //Clock
-      setDisplay(clk.hours, clk.minutes, clk.pm, clkMode);
+      setDisplay(clk.seconds, seconds >= 43200 /* boolean for PM LED enabled */, CLK);
 
       if (buttonHourPressed) {
-        clk.hours++;
-        if (clk.hours > 12) {
-          clk.hours = 1;
-          pmSwitched = false;
-        }
-        if (clk.hours > 11 && (pmSwitched == false)) {
-          pmSwitched = true;
-          clk.pm = !clk.pm;
+        clk.seconds += 3600;
+        if (clk.seconds > 86400) {
+          clk.seconds -= 86400;
         }
         delay(200); //delay is added so that the numbers change at a reasonable speed
       } else if (buttonMinPressed) {
-        clk.minutes++;
-        if (clk.minutes > 59) {
-          clk.minutes = 0;
+        int minutes = clk.seconds % 3600 + 60;
+        if (minutes > 59) {
+          clk.seconds = clk.seconds - clk.seconds % 3600;
+        } else {
+           clk.seconds += 60;
         }
         delay(200); //delay is added so that the numbers change at a reasonable speed
       }
 
       break;
     case CTR: //Counter or stopwatch
-      setDisplay(counter.minutes, counter.seconds, false /*Doesn't use the PM flag*/, clkMode);
+      setDisplay(counter.seconds, counter.flag /* boolean for PM LED enabled */ CTR);
       if (buttonHourPressed) { //Toggle counter
         counter.flag = !counter.flag;
         delay(300); //delay is added so the user has time to release button
       }
       if ((counter.flag == false) && (buttonMinPressed) ) { //Reset counter if it is stopped
-        counter.hours = 0;
-        counter.minutes = 0;
         counter.seconds = 0;
         delay(300); //delay is added so the user has time to release button
       }
 
       break;
     case TMR: //Timer
-      setDisplay(timer.minutes, timer.seconds, timer.flag /*indicator for timer running*/, clkMode);
+      setDisplay(timer.seconds, timer.flag /* indicator for timer running */, clkMode);
       if (buttonHourPressed && buttonMinPressed) {
         timer.flag = !timer.flag;                 // Start & stop timer
 
@@ -315,49 +271,44 @@ void loop() {
       }
       if (buttonHourPressed && !timer.flag) { // Cannot edit timer if it is running
         //Adds minutes
-        timer.minutes++;
-        if (timer.minutes > 60) {
-          timer.minutes = 0;
+        timer.seconds += 60;
+        if (timer.seconds > 3600) {
+          timer.seconds = 3600;
         }
         delay(200); //delay is added so the user has time to release
       }
       if (buttonMinPressed  && !timer.flag) { //Cannot edit timer if it is running
         //Removes minutes
-        timer.minutes--;
-        if (timer.minutes < 0) {
-          timer.minutes = 0;
+        timer.seconds -= 60;
+        if (timer.seconds < 0) {
+          timer.seconds = 0;
         }
         delay(200);
       }
       break;
     case ALM: //Alarm
-      setDisplay(alarm.hours, alarm.minutes, alarm.pm, clkMode);
+      setDisplay(alarm.seconds, alarm.flag, clkMode);
       if (buttonHourPressed) {
-        alarm.hours++;
-        if (alarm.hours > 12) {
-          alarm.hours = 1;
-          alarmPmSwitched = false;
-        }
-        if (alarm.hours > 11 && (alarmPmSwitched == false)) {
-          alarmPmSwitched = true;
-          alarm.pm = !alarm.pm;
-        }
+        alarm.seconds += 3600;
         delay(200);
       } else if (buttonMinPressed) {
-        alarm.minutes++;
-        if (alarm.minutes > 59) {
-          alarm.minutes = 0;
+        int minutes = alarm.seconds % 3600 + 60;
+        if (minutes > 59) {
+          alarm.seconds = alarm.seconds - alarm.seconds % 3600;
+        } else {
+           alarm.seconds += 60;
         }
         delay(200);
       }
       break;
   }
   if (alarm.flag) { //If the alarm is on
-    if (alarmSounding || ((clk.hours == alarm.hours) && (clk.minutes == alarm.minutes))) {
+    if (alarmSounding || ((alarm.seconds <= clk.seconds + 2) && (alarm.seconds >= clk.seconds))) {
       //If the alarm is already making noise or has just triggered
       alarmSounding = true;
       playAlarm();
     }
+     // TODO: add snooze
   } else {
     alarmSounding = false; //Stop playing the alarm
     if ( !timerAlarmSounding) { //If the timer is not playing its alarm
@@ -379,56 +330,29 @@ void loop() {
     int eeAddress = 1;
     EEPROM.put(eeAddress, clk.seconds);
     eeAddress += sizeof(int);
-    EEPROM.put(eeAddress, clk.minutes);
-    eeAddress += sizeof(int);
-    EEPROM.put(eeAddress, clk.hours);
-    eeAddress += sizeof(int);
-    EEPROM.put(eeAddress, clk.pm);
-    eeAddress += sizeof(bool);
 
     //Store alarm data
     EEPROM.put(eeAddress, alarm.seconds);
     eeAddress += sizeof(int);
-    EEPROM.put(eeAddress, alarm.minutes);
-    eeAddress += sizeof(int);
-    EEPROM.put(eeAddress, alarm.hours);
-    eeAddress += sizeof(int);
-    EEPROM.put(eeAddress, alarm.pm);
   }
   //Timer
   if (timer.flag) {
+    int minutes = timer.seconds % 3600 + 60;
+    if (minutes > 59) {
+      timer.seconds = timer.seconds - timer.seconds % 3600;
+    } else {
+      timer.seconds += 60;
+    }
     if (timer.seconds < 0) {
-      timer.minutes--;
-      if (timer.minutes < 0) {
-        timer.hours--;
-        if (timer.hours < 0) {
-          timer.hours = 0;
-          timer.minutes = 0;
-          timer.seconds = 0;
-          timer.flag = false; //stop counting
-          timerAlarmSounding = true;
-        } else {
-          timer.minutes = 59;
-        }
-      } else {
-        timer.seconds = 59;
-      }
+      timer.seconds = 0;
+      timer.flag = false; //stop counting
+      timerAlarmSounding = true;
     }
   }
 
-  //Counter / Stopwatch
-  if (counter.seconds > 59) {
-    counter.minutes++;
-    counter.seconds = 0; //Reset seconds
-  }
-  if (counter.minutes > 59) {
-    counter.hours++;
-    counter.minutes = 0; //Reset minutes
-  }
-  if (counter.hours > 99) {
+  //Stopwatch
+  if (counter.seconds > 86400) {
     counter.flag = false;
     counter.seconds = 0;
-    counter.minutes = 0;
-    counter.hours = 0;
   }
 }
